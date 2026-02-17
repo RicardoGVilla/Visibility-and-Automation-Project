@@ -11,10 +11,17 @@ class Port:
         self.status = status
 
 class ShippingRoute:
-    def __init__(self, name, waypoints, color, vessel, origin_port, destination_port):
+    def __init__(self, name, waypoints, color, origin_port, destination_port):
         self.name = name
-        self.waypoints = waypoints # path of the route as list of lat/lon pairs
+        self.waypoints = waypoints
         self.color = color
-        self.vessel = vessel
         self.origin_port = origin_port
         self.destination_port = destination_port
+
+class Voyage:
+    def __init__(self, route, vessel, departure_date, arrival_date, status='scheduled'):
+        self.route = route
+        self.vessel = vessel
+        self.departure_date = departure_date
+        self.arrival_date = arrival_date
+        self.status = status

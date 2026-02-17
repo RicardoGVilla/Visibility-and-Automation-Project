@@ -5,15 +5,16 @@ class VesselTrackingDashboard:
     def __init__(self):
     # initializing the map     
         self.map = folium.Map(location=(6.02, 81.5), tiles='CartoDB positron', zoom_start=2.4)
-        self.routes = []
+        self.voyages = []
     
-    # loads all routes from the service 
+    # loads all voyages from the service 
     def load_data(self):
         service = VesselTrackingService()
-        self.routes = service.get_routes()
+        self.voyages = service.get_voyages()
     
     def render_routes(self):
-        for route in self.routes:
+        for voyage in self.voyages:
+            route = voyage.route
             feature_group = folium.FeatureGroup(name=route.name, show=True)
             
             # Add route line
@@ -33,11 +34,11 @@ class VesselTrackingDashboard:
                 folium.Marker(route.destination_port.location, popup=route.destination_port.name).add_to(feature_group)
             
             # Add vessel marker
-            vessel_color = 'red' if route.vessel.status == 'delayed' else 'green' if route.vessel.status == 'on_time' else 'purple'
-            vessel_popup = f'{route.vessel.name}<br>{"⚠️ DELAYED" if route.vessel.status == "delayed" else "Current Location"}'
+            vessel_color = 'red' if voyage.status == 'delayed' else 'green' if voyage.status == 'in_transit' else 'purple'
+            vessel_popup = f'{voyage.vessel.name}<br>{"⚠️ DELAYED" if voyage.status == "delayed" else "Current Location"}'
             
             folium.Marker(
-                route.vessel.current_location,
+                voyage.vessel.current_location,
                 icon=folium.Icon(icon='ship', prefix='fa', color=vessel_color),
                 popup=vessel_popup
             ).add_to(feature_group)
