@@ -1,4 +1,5 @@
 from flask import Flask, request, jsonify
+from werkzeug.exceptions import HTTPException
 import sqlite3
 import json
 import random
@@ -6,6 +7,15 @@ from geopy.geocoders import Nominatim
 import time
 
 app = Flask(__name__)
+
+# Global error handler
+@app.errorhandler(Exception)
+def handle_exception(e):
+    # Pass through HTTP errors
+    if isinstance(e, HTTPException):
+        return jsonify({'error': e.description}), e.code
+    # Non-HTTP exceptions
+    return jsonify({'error': str(e)}), 500
 geolocator = Nominatim(user_agent="vessel_tracking_app_v1", timeout=10)
 
 def get_coordinates(port_name):
@@ -72,60 +82,55 @@ def receive_shipment():
     try:
         payload = request.json
         shipment = None
-        
-        for item in payload[0].get('included', []):
+        # Handle both list and dict payloads for 'included'
+        included = []
+        if isinstance(payload, list):
+            for entry in payload:
+                if isinstance(entry, dict) and 'included' in entry:
+                    included.extend(entry['included'])
+        elif isinstance(payload, dict):
+            included = payload.get('included', [])
+        for item in included:
             if item['type'] == 'shipment':
                 shipment = item
                 break
-        
         if not shipment:
             return jsonify({'error': 'No shipment data found'}), 400
-        
         attrs = shipment['attributes']
         origin_name = attrs.get('port_of_lading_name')
         dest_name = attrs.get('port_of_discharge_name')
         vessel_name = attrs.get('pod_vessel_name')
         departure_date = attrs.get('pol_atd_at')
         arrival_date = attrs.get('pod_eta_at')
-        
         if not all([origin_name, dest_name, vessel_name]):
             return jsonify({'error': 'Missing required fields'}), 400
-        
         conn = sqlite3.connect('vessel_tracking.db')
         cursor = conn.cursor()
-        
         origin_port_id, origin_lat, origin_lon = get_or_create_port(cursor, origin_name)
         dest_port_id, dest_lat, dest_lon = get_or_create_port(cursor, dest_name)
-        
         if not origin_port_id or not dest_port_id:
             conn.close()
             return jsonify({'error': 'Could not geocode ports'}), 400
-        
         cursor.execute('SELECT id FROM vessels WHERE name = ?', (vessel_name,))
         vessel = cursor.fetchone()
-        
         if not vessel:
             cursor.execute('INSERT INTO vessels (name, current_latitude, current_longitude) VALUES (?, ?, ?)', 
                            (vessel_name, 0.0, 0.0))
             vessel_id = cursor.lastrowid
         else:
             vessel_id = vessel[0]
-        
         route_id = get_or_create_route(cursor, origin_port_id, dest_port_id, 
                                         origin_lat, origin_lon, dest_lat, dest_lon,
                                         origin_name, dest_name)
-        
         cursor.execute('''INSERT INTO voyages (route_id, vessel_id, departure_date, arrival_date, status) 
                           VALUES (?, ?, ?, ?, ?)''',
                        (route_id, vessel_id, departure_date, arrival_date, 'in_transit'))
-        
         conn.commit()
         conn.close()
-        
         return jsonify({'message': 'Voyage created successfully'}), 201
-        
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        # This will be caught by the global error handler, but we keep it for clarity
+        return jsonify({'error': f'Internal error: {str(e)}'}), 500
 
 if __name__ == '__main__':
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    app.run(debug=True, host='0.0.0.0', port=5002)
