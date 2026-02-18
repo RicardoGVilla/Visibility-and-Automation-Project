@@ -1,108 +1,142 @@
 import folium
-from service import VesselTrackingService
+import sqlite3
 import searoute as sr
+from service import VesselTrackingService
+from geopy.geocoders import Nominatim
+try:
+    from global_land_mask import globe
+except ImportError:
+    globe = None
 
 class VesselTrackingDashboard:
-    """
-    the dashboard for visualizing maritime voyages, port statuses, 
-    and vessel positions using Folium and Searoute
-    """
     def __init__(self):
-        # initialize the base map with global coverage and jump-wrap marker persistence
-        self.map = folium.Map(location=[20, 0], tiles='CartoDB positron', zoom_start=2, world_copy_jump=True)
+        self.map = folium.Map(
+            location=[20, 0],
+            tiles='CartoDB positron',
+            zoom_start=2,
+            world_copy_jump=True,
+            height='60vh',  
+            width='100%',
+        )
         self.voyages = []
+        self.geolocator = Nominatim(user_agent="vessel_dashboard_final_leg_only", timeout=10)
 
     def load_data(self):
-        """fetches voyage and vessel data from the tracking service module"""
         service = VesselTrackingService()
         self.voyages = service.get_voyages()
 
-    def get_continuous_path(self, origin, destination):
-        """
-        calculates a route and adjusts longitudes to ensure 
-        linear continuity across the International Date Line.
-        """
-        try:
-            # normalize inputs to the standard [-180, 180] range for the routing engine
-            o_lonlat = [(origin[1] + 180) % 360 - 180, origin[0]]
-            d_lonlat = [(destination[1] + 180) % 360 - 180, destination[0]]
+    def is_land(self, lat, lon):
+        if globe:
+            return globe.is_land(lat, lon)
+        return False
 
-            # retrieve maritime-constrained path coordinates
-            route = sr.searoute(o_lonlat, d_lonlat, units="km", append_orig_dest=True)
-            raw_coords = route['geometry']['coordinates']
-            # (processing logic for path continuity can go here if needed)
-            return raw_coords
-        except Exception as e:
-            print(f"searoute failed: {e} → fallback straight line")
-            return [[origin[1], origin[0]], [destination[1], destination[0]]]
+    def unwrap_longitude(self, target_lon, reference_lon):
+        delta = target_lon - reference_lon
+        turns = round(delta / 360)
+        return target_lon - (turns * 360)
+
+    def get_port_coords(self, port_name):
+        conn = sqlite3.connect('vessel_tracking.db')
+        cursor = conn.cursor()
+        cursor.execute('SELECT latitude, longitude FROM ports WHERE name = ?', (port_name,))
+        row = cursor.fetchone()
+        if row:
+            conn.close()
+            return [row[0], row[1]]
+        try:
+            location = self.geolocator.geocode(port_name)
+            if location:
+                cursor.execute('INSERT INTO ports (name, latitude, longitude, status) VALUES (?, ?, ?, ?)', 
+                               (port_name, location.latitude, location.longitude, 'normal'))
+                conn.commit()
+                conn.close()
+                return [location.latitude, location.longitude]
+        except:
+            pass
+        conn.close()
+        return None
+
+    def get_continuous_leg(self, start_coords, end_coords, global_ref_lon, force_sea_route=False):
+        """
+        Calculates path. 
+        force_sea_route: If True, skips the land check and always tries searoute.
+        """
+        target_lat, target_lon = end_coords
+        unwrapped_end_lon = self.unwrap_longitude(target_lon, global_ref_lon)
+
+        # Apply land check ONLY if it is not a 'forced' sea route leg
+        if not force_sea_route and self.is_land(target_lat, target_lon):
+            return [[start_coords[0], start_coords[1]], [target_lat, unwrapped_end_lon]], True
+
+        try:
+            norm_start = [(start_coords[1] + 180) % 360 - 180, start_coords[0]]
+            norm_end = [(target_lon + 180) % 360 - 180, target_lat]
+            
+            route = sr.searoute(norm_start, norm_end, units="km")
+            raw_path = route['geometry']['coordinates']
+            
+            linear_path = []
+            prev_lon = start_coords[1]
+            for lon, lat in raw_path:
+                actual_lon = self.unwrap_longitude(lon, prev_lon)
+                linear_path.append([lat, actual_lon])
+                prev_lon = actual_lon
+            return linear_path, False
+        except:
+            return [[start_coords[0], start_coords[1]], [target_lat, unwrapped_end_lon]], True
 
     def render_routes(self):
-        all_bounds = []  # for auto-fit
-
+        all_bounds = []
         for voyage in self.voyages:
             route = voyage.route
             feature_group = folium.FeatureGroup(name=route.name, show=True)
+            
+            transshipments = getattr(voyage, 'transshipment_ports', []) or []
+            port_names = [route.origin_port.name] + transshipments + [route.destination_port.name]
+            resolved_coords = [self.get_port_coords(n) for n in port_names if self.get_port_coords(n)]
 
-            origin = route.origin_port.location       # [lat, lon]
-            destination = route.destination_port.location
+            if not resolved_coords: continue
 
-            # Only use searoute for path, ignore waypoints
-            path_segments = self.get_searoute_coords(origin, destination)
+            current_pos = resolved_coords[0]
+            current_ref_lon = current_pos[1]
+            folium.Marker(current_pos, popup=f"Origin: {port_names[0]}").add_to(feature_group)
 
-            # Draw each segment as separate PolyLine
-            for segment in path_segments:
-                if len(segment) < 2:
-                    continue
+            num_legs = len(resolved_coords) - 1
+            for i in range(num_legs):
+                # RULE: Force sea route for all legs EXCEPT the final one
+                is_final_leg = (i == num_legs - 1)
+                force_sea = not is_final_leg
+                
+                leg_path, is_inland = self.get_continuous_leg(current_pos, resolved_coords[i+1], current_ref_lon, force_sea_route=force_sea)
+                
                 folium.PolyLine(
-                    locations=segment,
+                    locations=leg_path,
                     color=route.color,
-                    weight=3,
-                    opacity=0.8,
-                    dash_array='10, 5'
+                    weight=2,
+                    opacity=0.5
                 ).add_to(feature_group)
+                
+                current_pos = leg_path[-1]
+                current_ref_lon = current_pos[1]
+                folium.Marker(current_pos, popup=port_names[i+1]).add_to(feature_group)
+                all_bounds.extend(leg_path)
 
-            # Origin marker
-            folium.Marker(
-                origin,
-                popup=route.origin_port.name
-            ).add_to(feature_group)
-
-            # Destination marker with optional strike
-            if route.destination_port.status == 'strike':
-                folium.Marker(
-                    destination,
-                    popup=f'<b style="color: orange;">⚠️ PORT STRIKE</b><br>{route.destination_port.name}',
-                    icon=folium.Icon(color='orange', icon='exclamation-triangle', prefix='fa')
-                ).add_to(feature_group)
-            else:
-                folium.Marker(
-                    destination,
-                    popup=route.destination_port.name
-                ).add_to(feature_group)
-
-            # Vessel marker
-            vessel_color = 'red' if voyage.status == 'delayed' else 'green' if voyage.status == 'in_transit' else 'purple'
-            vessel_popup = f'{voyage.vessel.name}<br>{"⚠️ DELAYED" if voyage.status == "delayed" else "Current Location"}'
-
-            vessel_loc = voyage.vessel.current_location
-            if vessel_loc and len(vessel_loc) == 2:
-                folium.Marker(
-                    vessel_loc,
-                    icon=folium.Icon(icon='ship', prefix='fa', color=vessel_color),
-                    popup=vessel_popup
-                ).add_to(feature_group)
-
+            v_loc = voyage.vessel.current_location
+            if v_loc:
+                v_lat, v_lon_u = v_loc[0], self.unwrap_longitude(v_loc[1], current_ref_lon)
+                folium.Marker([v_lat, v_lon_u], icon=folium.Icon(color='green', icon='ship', prefix='fa')).add_to(feature_group)
+                all_bounds.append([v_lat, v_lon_u])
             feature_group.add_to(self.map)
 
-            # Collect bounds
-            all_bounds.extend([origin, destination, vessel_loc])
-
         if all_bounds:
-            valid_points = [p for p in all_bounds if p and len(p) == 2 and all(isinstance(c, (int, float)) for c in p)]
-            if valid_points:
-                min_lat = min(p[0] for p in valid_points)
-                max_lat = max(p[0] for p in valid_points)
-                min_lon = min(p[1] for p in valid_points)
-                max_lon = max(p[1] for p in valid_points)
-                # Add some padding
-                self.map.fit_bounds([[min_lat, min_lon], [max_lat, max_lon]], padding=(0.15, 0.15))
+            self.map.fit_bounds(all_bounds, padding=(0.1, 0.1))
+
+    def generate(self):
+        self.load_data()
+        self.render_routes()
+        folium.LayerControl(collapsed=False).add_to(self.map)
+        self.map.save('index.html')
+
+if __name__ == '__main__':
+    dashboard = VesselTrackingDashboard()
+    dashboard.generate()

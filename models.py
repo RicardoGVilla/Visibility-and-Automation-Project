@@ -11,17 +11,17 @@ class Port:
         self.status = status
 
 class ShippingRoute:
-    def __init__(self, name, waypoints, color, origin_port, destination_port):
+    def __init__(self, name, color, origin_port, destination_port):
         self.name = name
-        self.waypoints = waypoints
         self.color = color
         self.origin_port = origin_port
         self.destination_port = destination_port
 
 class Voyage:
-    def __init__(self, route, vessel, departure_date, arrival_date, status='scheduled'):
+    def __init__(self, route, vessel, departure_date, arrival_date, status='scheduled', transshipment_ports=None):
         self.route = route
         self.vessel = vessel
         self.departure_date = departure_date
         self.arrival_date = arrival_date
         self.status = status
+        self.transshipment_ports = transshipment_ports if transshipment_ports is not None else []

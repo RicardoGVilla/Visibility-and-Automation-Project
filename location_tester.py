@@ -1,7 +1,7 @@
 from geopy.geocoders import Nominatim
 
 # List of locations from the CSV
-locations = ["haiphong", "yantian", "ningbo"]
+locations = ["montreal"]
 
 geolocator = Nominatim(user_agent="geoapi_tester")
 

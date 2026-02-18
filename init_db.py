@@ -45,7 +45,6 @@ def init_database():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             service_line_id INTEGER,
             name TEXT NOT NULL,
-            waypoints TEXT NOT NULL,
             color TEXT NOT NULL,
             origin_port_id INTEGER,
             destination_port_id INTEGER,
@@ -63,6 +62,7 @@ def init_database():
             departure_date TEXT,
             arrival_date TEXT,
             status TEXT DEFAULT 'scheduled',
+            legs TEXT DEFAULT '[]',
             FOREIGN KEY (route_id) REFERENCES routes(id),
             FOREIGN KEY (vessel_id) REFERENCES vessels(id)
         )
@@ -102,12 +102,12 @@ def init_database():
     
     # Insert routes
     routes_data = [
-        (1, 'Chittagong-Montreal Route', json.dumps([[22.3569, 91.7832], [6.9271, 79.8612], [30.0, 32.5], [36.0, -5.5], [44.6488, -63.5752], [45.5017, -73.5673]]), '#2E86AB', 1, 4),
-        (2, 'Rotterdam-Norfolk Route', json.dumps([[51.9244, 4.4777], [36.8468, -76.2852]]), '#F18F01', 5, 6),
-        (2, 'Southampton-Boston Route', json.dumps([[50.9097, -1.4044], [42.3601, -71.0589]]), '#9B59B6', 7, 8),
-        (2, 'Hamburg-New York Route', json.dumps([[53.5511, 9.9937], [51.9244, 4.4777], [51.9613, 1.2977], [50.0, -10.0], [48.0, -30.0], [42.0, -50.0], [40.6692, -74.0445]]), '#E74C3C', 9, 11)
+        (1, 'Chittagong-Montreal Route', '#2E86AB', 1, 4),
+        (2, 'Rotterdam-Norfolk Route', '#F18F01', 5, 6),
+        (2, 'Southampton-Boston Route', '#9B59B6', 7, 8),
+        (2, 'Hamburg-New York Route', '#E74C3C', 9, 11)
     ]
-    cursor.executemany('INSERT INTO routes (service_line_id, name, waypoints, color, origin_port_id, destination_port_id) VALUES (?, ?, ?, ?, ?, ?)', routes_data)
+    cursor.executemany('INSERT INTO routes (service_line_id, name, color, origin_port_id, destination_port_id) VALUES (?, ?, ?, ?, ?)', routes_data)
     
     # Insert voyages
     voyages_data = [

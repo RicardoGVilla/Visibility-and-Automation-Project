@@ -38,6 +38,5 @@ def infer_route(port_list: List[str], east_canada_ports=None) -> List[Tuple[floa
 # Example usage
 if __name__ == "__main__":
     route = infer_route(['Haiphong', 'Singapore', 'Halifax'])
-    print("Route waypoints:")
     for lat, lon in route:
         print(f"{lat}, {lon}")
