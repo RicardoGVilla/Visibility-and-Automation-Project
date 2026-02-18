@@ -109,15 +109,6 @@ def init_database():
     ]
     cursor.executemany('INSERT INTO routes (service_line_id, name, color, origin_port_id, destination_port_id) VALUES (?, ?, ?, ?, ?)', routes_data)
     
-    # Insert voyages
-    voyages_data = [
-        (1, 1, '2026-01-28 12:30', '2026-03-10', 'in_transit'),
-        (2, 2, '2026-02-05 14:00', '2026-02-20', 'delayed'),
-        (3, 3, '2026-02-12 10:00', '2026-02-20', 'in_transit'),
-        (4, 4, '2026-02-15 08:00', '2026-02-28', 'in_transit')
-    ]
-    cursor.executemany('INSERT INTO voyages (route_id, vessel_id, departure_date, arrival_date, status) VALUES (?, ?, ?, ?, ?)', voyages_data)
-    
     conn.commit()
     conn.close()
 

@@ -112,6 +112,12 @@ def receive_shipment():
                     port_id = ev['relationships']['location']['data']['id']
                 if port_id and port_id in port_lookup:
                     legs.append(port_lookup[port_id])
+        # Add any additional ports from included that are not origin or destination and not already in legs
+        for p in included:
+            if p['type'] == 'port' and 'attributes' in p and 'name' in p['attributes']:
+                pname = p['attributes']['name']
+                if pname not in legs and pname not in (origin_name, dest_name):
+                    legs.append(pname)
         full_legs = []
         if origin_name:
             full_legs.append(origin_name)
@@ -133,12 +139,21 @@ def receive_shipment():
             return jsonify({'error': 'Could not geocode ports'}), 400
         cursor.execute('SELECT id FROM vessels WHERE name = ?', (vessel_name,))
         vessel = cursor.fetchone()
+        # Find vessel object in included
+        vessel_obj = next((item for item in included if item['type'] == 'vessel' and 'attributes' in item and item['attributes'].get('name') == vessel_name), None)
+        vessel_lat = None
+        vessel_lon = None
+        if vessel_obj:
+            vessel_lat = vessel_obj['attributes'].get('latitude')
+            vessel_lon = vessel_obj['attributes'].get('longitude')
+        # Set vessel's initial location to the vessel's coordinates if available, else origin port's coordinates
         if not vessel:
-            # Set vessel's initial location to the origin port's coordinates
-            vessel_lat = origin_lat if origin_lat is not None else 0.0
-            vessel_lon = origin_lon if origin_lon is not None else 0.0
-            cursor.execute('INSERT INTO vessels (name, current_latitude, current_longitude) VALUES (?, ?, ?)', 
-                           (vessel_name, vessel_lat, vessel_lon))
+            if vessel_lat is not None and vessel_lon is not None:
+                cursor.execute('INSERT INTO vessels (name, current_latitude, current_longitude) VALUES (?, ?, ?)', 
+                               (vessel_name, vessel_lat, vessel_lon))
+            else:
+                cursor.execute('INSERT INTO vessels (name, current_latitude, current_longitude) VALUES (?, ?, ?)', 
+                               (vessel_name, origin_lat if origin_lat is not None else 0.0, origin_lon if origin_lon is not None else 0.0))
             vessel_id = cursor.lastrowid
         else:
             vessel_id = vessel[0]
