@@ -1,7 +1,9 @@
 import folium
 import sqlite3
+import math
 import searoute as sr
 from service import VesselTrackingService
+from models import Port
 from geopy.geocoders import Nominatim
 try:
     from global_land_mask import globe
@@ -9,6 +11,33 @@ except ImportError:
     globe = None
 
 class VesselTrackingDashboard:
+    def handle_last_mile_leg(self, current_pos, end_pos, start_port_name, end_port_name, route, current_ref_lon, feature_group):
+        leg_path, is_inland = self.get_continuous_leg(current_pos, end_pos, current_ref_lon, force_sea_route=False)
+        # Log segment info
+        if is_inland:
+            print(f"[INFO] Fallback: Inland segment used from {start_port_name} ({current_pos}) to {end_port_name} ({end_pos}) (sea route not used)")
+        else:
+            print(f"[INFO] SeaRoute library used: Path generated from {start_port_name} ({current_pos}) to {end_port_name} ({end_pos})")
+        folium.PolyLine(
+            locations=leg_path,
+            color=route.color,
+            weight=2,
+            opacity=0.5
+        ).add_to(feature_group)
+        folium.Marker(
+            leg_path[-1],
+            popup=folium.Popup(
+                f"""
+                <div style='padding:8px;min-width:160px;max-width:220px;background:#fff;border-radius:8px;box-shadow:0 2px 8px rgba(0,0,0,0.12);border:1px solid #e0e0e0;'>
+                    <div style='font-weight:bold;font-size:1.1em;color:#2c3e50;'>Port</div>
+                    <div style='margin-top:4px;color:#555;'>{end_port_name}</div>
+                </div>
+                """,
+                max_width=250
+            )
+        ).add_to(feature_group)
+        return leg_path[-1], leg_path
+
     def add_custom_legend(self, route_infos):
         map_id = self.map._id
         map_var = f"map_{map_id.replace('-', '')}"
@@ -64,6 +93,7 @@ class VesselTrackingDashboard:
         </script>
         """
         self.map.get_root().html.add_child(folium.Element(legend_html))
+
     def __init__(self):
         self.map = folium.Map(
             location=[20, 0],
@@ -80,11 +110,66 @@ class VesselTrackingDashboard:
         service = VesselTrackingService()
         self.voyages = service.get_voyages()
 
+    def sorting_dynamic_voyages(self, voyage):
+        """
+        Returns (sorted_port_names, sorted_coords) for a given voyage using nearest-neighbor logic.
+        """
+        origin = {'name': voyage.route.origin_port.name, 'coord': voyage.route.origin_port.location}
+        destination = {'name': voyage.route.destination_port.name, 'coord': voyage.route.destination_port.location}
+        others = []
+        for t in voyage.transshipment_ports:
+            if isinstance(t, dict) and 'name' in t and 'coordinates' in t:
+                others.append({'name': t['name'], 'coord': t['coordinates']})
+            elif isinstance(t, Port):
+                others.append({'name': t.name, 'coord': t.location})
+            elif isinstance(t, str):
+                coord = self.get_port_coords(t)
+                others.append({'name': t, 'coord': coord})
+            else:
+                try:
+                    name, coord = t
+                    others.append({'name': name, 'coord': coord})
+                except Exception:
+                    others.append({'name': str(t), 'coord': None})
+        vessel = voyage.vessel
+        if hasattr(vessel, 'current_location') and vessel.current_location is not None:
+            others.append({'name': vessel.name + ' (vessel)', 'coord': vessel.current_location})
+        others_with_coords = [p for p in others if p['coord'] is not None]
+        def haversine(coord1, coord2):
+            lat1, lon1 = coord1
+            lat2, lon2 = coord2
+            R = 6371
+            phi1 = math.radians(lat1)
+            phi2 = math.radians(lat2)
+            dphi = math.radians(lat2 - lat1)
+            dlambda = math.radians(lon2 - lon1)
+            a = math.sin(dphi/2)**2 + math.cos(phi1)*math.cos(phi2)*math.sin(dlambda/2)**2
+            c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
+            return R * c
+        sorted_points = []
+        current = origin
+        pool = others_with_coords.copy()
+        while pool:
+            next_idx, next_point = min(enumerate(pool), key=lambda x: haversine(current['coord'], x[1]['coord']))
+            sorted_points.append(next_point)
+            current = next_point
+            pool.pop(next_idx)
+        coords_sorted = [origin] + sorted_points + [destination]
+        port_names_sorted = [p['name'] for p in coords_sorted]
+        coords_sorted_only = [p['coord'] for p in coords_sorted]
+        # Print the ordered array
+        print("[COORDINATES ORDERED]")
+        for p in coords_sorted:
+            print(f"  {p['name']}: {p['coord']}")
+        print("---")
+        return port_names_sorted, coords_sorted_only
+
     def is_land(self, lat, lon):
         if globe:
             return globe.is_land(lat, lon)
         return False
 
+    # function returns an adjusted longitude value. ensures that when plotting routes crossing the 180° meridian, the path remains visually continuous and accurate, avoiding misleading jumps on the map
     def unwrap_longitude(self, target_lon, reference_lon):
         delta = target_lon - reference_lon
         turns = round(delta / 360)
@@ -112,44 +197,47 @@ class VesselTrackingDashboard:
         return None
 
     def get_continuous_leg(self, start_coords, end_coords, global_ref_lon, force_sea_route=False):
-        """
-        Calculates path. 
-        force_sea_route: If True, skips the land check and always tries searoute.
-        """
         target_lat, target_lon = end_coords
+        # adjusted coordinates 
         unwrapped_end_lon = self.unwrap_longitude(target_lon, global_ref_lon)
 
-        # Apply land check ONLY if it is not a 'forced' sea route leg
+        # if not forced sea route and if leg is on land 
         if not force_sea_route and self.is_land(target_lat, target_lon):
+            # return a straight line 
             return [[start_coords[0], start_coords[1]], [target_lat, unwrapped_end_lon]], True
 
         try:
-            norm_start = [(start_coords[1] + 180) % 360 - 180, start_coords[0]]
-            norm_end = [(target_lon + 180) % 360 - 180, target_lat]
-            
-            route = sr.searoute(norm_start, norm_end, units="km")
-            raw_path = route['geometry']['coordinates']
-            
-            linear_path = []
-            prev_lon = start_coords[1]
-            for lon, lat in raw_path:
-                actual_lon = self.unwrap_longitude(lon, prev_lon)
-                linear_path.append([lat, actual_lon])
-                prev_lon = actual_lon
+            linear_path = self.calculate_sea_leg(start_coords, [target_lat, target_lon])
             return linear_path, False
         except:
             return [[start_coords[0], start_coords[1]], [target_lat, unwrapped_end_lon]], True
+    
+    def calculate_sea_leg(self, start_coords, end_coords):
+        """
+        calculates a sea route leg using the searoute library, normalizes coordinates, unwraps longitude for continuity.
+        returns a list of [lat, lon] pairs.
+        """
+        norm_start = [(start_coords[1] + 180) % 360 - 180, start_coords[0]]
+        norm_end = [(end_coords[1] + 180) % 360 - 180, end_coords[0]]
+        route = sr.searoute(norm_start, norm_end, units="km")
+        raw_path = route['geometry']['coordinates']
+        linear_path = []
+        prev_lon = start_coords[1]
+        for lon, lat in raw_path:
+            actual_lon = self.unwrap_longitude(lon, prev_lon)
+            linear_path.append([lat, actual_lon])
+            prev_lon = actual_lon
+        return linear_path
 
     def render_routes(self):
         all_bounds = []
         route_infos = []
+
         for voyage in self.voyages:
             route = voyage.route
             feature_group = folium.FeatureGroup(name=route.name, show=True)
             route_infos.append((route.name, route.color))
-            transshipments = getattr(voyage, 'transshipment_ports', []) or []
-            port_names = [route.origin_port.name] + transshipments + [route.destination_port.name]
-            resolved_coords = [self.get_port_coords(n) for n in port_names if self.get_port_coords(n)]
+            port_names, resolved_coords = self.sorting_dynamic_voyages(voyage)
             if not resolved_coords:
                 continue
             current_pos = resolved_coords[0]
@@ -167,9 +255,9 @@ class VesselTrackingDashboard:
                 )
             ).add_to(feature_group)
             num_legs = len(resolved_coords) - 1
+
             for i in range(num_legs):
                 is_final_leg = (i == num_legs - 1)
-                force_sea = not is_final_leg
                 # Set port names for logging
                 start_port_name = port_names[i]
                 end_port_name = port_names[i+1]
@@ -181,32 +269,35 @@ class VesselTrackingDashboard:
                 force_sea_override = False
                 if num_legs == 1 and not is_pacific:
                     force_sea_override = True
-                leg_path, is_inland = self.get_continuous_leg(current_pos, resolved_coords[i+1], current_ref_lon, force_sea_route=(force_sea or force_sea_override))
-                # Log segment info
-                if is_inland:
-                    print(f"[INFO] Fallback: Inland segment used from {start_port_name} ({start_port_coords}) to {end_port_name} ({end_port_coords}) (sea route not used)")
+                if is_final_leg:
+                    current_pos, leg_path = self.handle_last_mile_leg(current_pos, end_port_coords, start_port_name, end_port_name, route, current_ref_lon, feature_group)
                 else:
-                    print(f"[INFO] SeaRoute library used: Path generated from {start_port_name} ({start_port_coords}) to {end_port_name} ({end_port_coords})")
-                folium.PolyLine(
-                    locations=leg_path,
-                    color=route.color,
-                    weight=2,
-                    opacity=0.5
-                ).add_to(feature_group)
-                current_pos = leg_path[-1]
-                current_ref_lon = current_pos[1]
-                folium.Marker(
-                    current_pos,
-                    popup=folium.Popup(
-                        f"""
-                        <div style='padding:8px;min-width:160px;max-width:220px;background:#fff;border-radius:8px;box-shadow:0 2px 8px rgba(0,0,0,0.12);border:1px solid #e0e0e0;'>
-                            <div style='font-weight:bold;font-size:1.1em;color:#2c3e50;'>Port</div>
-                            <div style='margin-top:4px;color:#555;'>{port_names[i+1]}</div>
-                        </div>
-                        """,
-                        max_width=250
-                    )
-                ).add_to(feature_group)
+                    leg_path, is_inland = self.get_continuous_leg(current_pos, end_port_coords, current_ref_lon, force_sea_route=(True or force_sea_override))
+                    # Log segment info
+                    if is_inland:
+                        print(f"[INFO] Fallback: Inland segment used from {start_port_name} ({start_port_coords}) to {end_port_name} ({end_port_coords}) (sea route not used)")
+                    else:
+                        print(f"[INFO] SeaRoute library used: Path generated from {start_port_name} ({start_port_coords}) to {end_port_name} ({end_port_coords})")
+                    folium.PolyLine(
+                        locations=leg_path,
+                        color=route.color,
+                        weight=2,
+                        opacity=0.5
+                    ).add_to(feature_group)
+                    current_pos = leg_path[-1]
+                    current_ref_lon = current_pos[1]
+                    folium.Marker(
+                        current_pos,
+                        popup=folium.Popup(
+                            f"""
+                            <div style='padding:8px;min-width:160px;max-width:220px;background:#fff;border-radius:8px;box-shadow:0 2px 8px rgba(0,0,0,0.12);border:1px solid #e0e0e0;'>
+                                <div style='font-weight:bold;font-size:1.1em;color:#2c3e50;'>Port</div>
+                                <div style='margin-top:4px;color:#555;'>{end_port_name}</div>
+                            </div>
+                            """,
+                            max_width=250
+                        )
+                    ).add_to(feature_group)
                 all_bounds.extend(leg_path)
             v_loc = voyage.vessel.current_location
             if v_loc:
